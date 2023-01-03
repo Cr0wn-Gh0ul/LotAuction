@@ -165,21 +165,31 @@ contract AttributeAuction is ERC721Enumerable {
         _createAuction();
     }
 
-/**
-* @dev Collects prizes for a winner for one auction they have won
-* @dev It must be called once per auction won
-* TODO: Create a view function that returns the number of prizes a winner has
- */
+    /**
+     * @dev Collects prizes for a winner for one auction they have won
+     * @dev It must be called once per auction won
+     * TODO: Create a view function that returns the number of prizes a winner has
+     */
     function collectPrizes() external {
+        // get auctions won by this address
         uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
+        // get the last auction won by this address
         uint256 targetAuction = auctionsWon_.length - 1;
+        // require this address has won at least one auction
         require(auctionsWon_.length > 0, "No prizes to collect");
+        // get the number of prizes won for this auction
         uint256 auctionClaim = auctionsWon_[targetAuction];
+        // remove this auction from the winners address => auctions[] mapping
         auctionsWon[msg.sender].pop();
+        // get the number of prizes won for this auction
         uint256 prizeAmount = prizes[auctionClaim];
+        // mint the prizes for this auction
         _mint(prizeAmount, targetAuction);
     }
 
+    /**
+     * @dev Mints a number of tokens for a winner of an auction
+     */
     function _mint(uint256 amount_, uint256 auctionId) internal {
         PrizePool storage pPool = prizePool[auctionId];
         (uint256 tokenIdLow, , ) = tokenIdRange(auctionId);
@@ -187,6 +197,14 @@ contract AttributeAuction is ERC721Enumerable {
         uint256 currentPrng = pPool.currentPrng;
         uint256 tokenId;
         for (uint256 i = 0; i < amount_; i++) {
+            /**
+             * @notice Pull a random token id to be minted next
+             * @dev Created by dievardump (Simon Fremaux)
+             * @dev Implemented in CyberBrokersMint Contract(0xd64291d842212bcf20db9dbece7823fe103061ab) by cybourgeoisie (Ben Herdorn)
+             * @dev Modifications of this function were made to optimize gas
+             * @param leftToMint_ How many tokens are left to be minted
+             * @param currentPrng_ The curent set prng
+             **/
             currentPrng = _prng(leftToMint, currentPrng);
             uint256 index = 1 + (currentPrng % leftToMint);
             tokenId = pPool.idSwaps[index];
@@ -207,6 +225,11 @@ contract AttributeAuction is ERC721Enumerable {
         pPool.currentPrng = currentPrng;
     }
 
+    /**
+     * @dev prng to be used by _pullRandomTokenId
+     * @param leftToMint_ number of tokens left to mint
+     * @param currentPrng_ the last value returned by this function
+     */
     function _prng(uint256 leftToMint_, uint256 currentPrng_)
         internal
         view
