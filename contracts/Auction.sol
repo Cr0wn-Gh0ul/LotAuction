@@ -2,9 +2,10 @@
 pragma solidity ^0.8.17;
 
 import "./RedBlackTreeLibrary.sol";
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
-contract AttributeAuction is ERC721Enumerable {
+contract AttributeAuction is ERC721, Ownable {
     using RedBlackTreeLibrary for RedBlackTreeLibrary.Tree;
     enum LotType {
         PHASE_1,
@@ -24,53 +25,49 @@ contract AttributeAuction is ERC721Enumerable {
         uint256 currentPrng;
         mapping(uint256 => uint256) idSwaps;
     }
-
     // auction number (auctionLive) => auction info
     mapping(uint256 => Auction) public auctions;
     // auction number (auctionLive) => (bid amount => bidder address)
     mapping(uint256 => mapping(uint256 => address)) public bids;
+    // auction number (auctionLive) => (bidder address => bidAmount)
+    mapping(uint256 => mapping(address => uint256)) public activeBid;
     // auction number (auctionLive) => bid tree
     mapping(uint256 => RedBlackTreeLibrary.Tree) public bidTrees;
-
+    // bidder address => auction numbers (auctionLive)
     mapping(address => uint256[]) public auctionsWon;
+    // auction number (auctionLive) => # of tokens to be minted per address
     mapping(uint256 => uint256) public prizes;
-
+    // auction number (auctionLive) => prize pool
     mapping(uint256 => PrizePool) internal prizePool;
-
     // current auction number
     uint256 public auctionLive;
     // minimum bid
     uint256 public reservePrice;
     // minimum bid increment percentage
     uint256 public minBidIncrementPercentage;
+    // auction duration
+    uint256 public blockDuration;
+    // contract paused
+    bool isPaused;
+
+    modifier notPaused() {
+        require(!isPaused, "Contract is not paused");
+        _;
+    }
+
+    modifier activeBidder() {
+        require(
+            activeBid[auctionLive][msg.sender] > 0,
+            "Bidder has no active bid"
+        );
+        _;
+    }
 
     constructor() ERC721("AttributeAuction", "ATTR") {
         reservePrice = 0.01 ether;
         minBidIncrementPercentage = 5;
+        blockDuration = 1800;
         _createAuction();
-    }
-
-    /**
-     * @dev Creates a new auction
-     * TODO: swap out timestamp for block number
-     */
-    function _createAuction() internal {
-        // increment auction number
-        auctionLive++;
-        // create new auction
-        auctions[auctionLive] = Auction({
-            startTime: block.timestamp,
-            endTime: block.timestamp + 6 hours,
-            winningBidsPlaced: 0,
-            settled: false,
-            lotType: getAuctionLotType()
-        });
-        // create a new prize pool
-        PrizePool storage pPool = prizePool[auctionLive];
-        // get number of tokens to be minted for this auction
-        (, , uint256 tokenAmount) = tokenIdRange(auctionLive);
-        // set number of tokens to be minted for this auction
-        pPool.leftToMint = tokenAmount;
     }
 
     /**
@@ -80,25 +77,17 @@ contract AttributeAuction is ERC721Enumerable {
      * @dev Does not accept bids if the auction is full and the bid is less than or equal to the lowest winning bid
      * @dev Does not accept bids that are equal to a bid that has already been placed
      * @dev Accepts any bid over reserve price if auction is not full
-     * TODO: disallow for multiple bids by the same address
+     * @dev Does not accept bids from an address more than once
      */
-    function addBid() external payable {
+    function addBid() public payable notPaused {
+        // check if bid already exists
+        require(activeBid[auctionLive][msg.sender] == 0, "Bid already exists");
         // get current auction
         Auction memory auction = auctions[auctionLive];
         // get bid amount
         uint256 amount = msg.value;
-
         // check if the current auction has been settled
-        // TODO: May be unnecessary
-        require(!auction.settled, "Auction has been settled");
-        // check if the auction has started
-        // TODO: May not be needed, but may be good for UI
-        require(
-            auction.startTime >= block.timestamp,
-            "Auction has not started"
-        );
-        // check if the auction has ended
-        require(auction.endTime <= block.timestamp, "Auction has ended");
+        checkActiveAuction();
         // check if bid is greater than reserve price
         require(amount > reservePrice, "Bid amount is less than reserve price");
         // check if bid for this amount already exists
@@ -111,37 +100,91 @@ contract AttributeAuction is ERC721Enumerable {
             // find lowest winning bid
             uint256 lowestBid = bidTrees[auctionLive].first();
             // require bid is greater than lowest winning bid
-            // TODO: require it is minBidIncrementPercentage greater than lowest winning bid
             require(
-                amount > lowestBid,
-                "Bid amount is less than the lowest winning bid"
+                amount >
+                    lowestBid + ((lowestBid * minBidIncrementPercentage) / 100),
+                "Bid amount is less than the lowest winning bid + minBidIncrementPercentage"
             );
             // remove lowest winning bid from bid tree
             bidTrees[auctionLive].remove(lowestBid);
-            // decrement number of winning bids
-            // TODO: this is a little ugly, maybe make a helper function
-            auction.winningBidsPlaced--;
+            // send lowest winning bid back to bidder
+            refundBid(bids[auctionLive][lowestBid], lowestBid);
+            // delete bid from active bid mapping
+            delete bids[auctionLive][lowestBid];
+        } else {
+            // increment number of winning bids
+            auction.winningBidsPlaced++;
         }
+        // add bid to active bid mapping
+        activeBid[auctionLive][msg.sender] = amount;
         // add bid to bid tree
         bidTrees[auctionLive].insert(amount);
         // add bid to address mapping for this auction
         // for reverse tree lookup
         bids[auctionLive][amount] = msg.sender;
-        // increment number of winning bids
-        auction.winningBidsPlaced++;
         // update auction info
         auctions[auctionLive] = auction;
+    }
+
+    /**
+     * @dev increases bid in the auction
+     * @dev Only accepts bids that have already been placed
+     */
+    function increaseBid() external payable notPaused activeBidder {
+        // get bid on this auction
+        uint256 lastBid = activeBid[auctionLive][msg.sender];
+        // check if bid is greater than last bid + reserve price
+        require(
+            msg.value > lastBid + ((lastBid * minBidIncrementPercentage) / 100),
+            "New bid is too low"
+        );
+        // remove last bid from this auction
+        activeBid[auctionLive][msg.sender] = 0;
+        // add the new bid
+        addBid();
+    }
+
+    /**
+     * @dev Removes a bid from the auction
+     * @dev Only accepts bids that have already been placed
+     */
+    function removeBid() external payable notPaused activeBidder {
+        checkActiveAuction();
+        // get bid on this auction
+        uint256 lastBid = activeBid[auctionLive][msg.sender];
+        // remove lowest winning bid from bid tree
+        bidTrees[auctionLive].remove(lastBid);
+        // send lowest winning bid back to bidder
+        refundBid(bids[auctionLive][lastBid], lastBid);
+        // delete bid from active bid mapping
+        delete bids[auctionLive][lastBid];
+        // delete bid from active winningBidsPlaced
+        Auction storage auction = auctions[auctionLive];
+        auction.winningBidsPlaced--;
+    }
+
+    /**
+     * @dev checks if the auction is active and okay for bidding or bid removal
+     */
+    function checkActiveAuction() internal view {
+        // get current auction
+        Auction memory auction = auctions[auctionLive];
+        // check if the current auction has been settled
+        require(!auction.settled, "Auction has been settled");
+        // check if the auction has started
+        require(auction.startTime >= block.number, "Auction has not started");
+        // check if the auction has ended
+        require(auction.endTime <= block.number, "Auction has ended");
     }
 
     /**
      * @dev Settles a auction that has completed
      * @dev Adds winners of the auction to the winners mapping
      */
-    function settleAuction() external {
+    function settleAuction() external notPaused {
         // get current auction
         Auction memory auction = auctions[auctionLive];
         // check if the current auction has been settled
-        // TODO: May be unnecessary
         require(!auction.settled, "Auction has been settled");
         // check if the auction has ended
         require(auction.endTime <= block.timestamp, "Auction has not ended");
@@ -155,10 +198,10 @@ contract AttributeAuction is ERC721Enumerable {
         for (uint256 i = 0; i < winners.length; i++) {
             // add this auction to the winners address => auctions[] mapping
             auctionsWon[winners[i]].push(auctionLive);
-            // map this auction => prizes per address mapping
-            // TODO: Does not work if totalPrizes is not divisible by winners.length
-            prizes[auctionLive] += totalPrizes / winners.length;
         }
+        // map this auction => prizes per address mapping
+        // TODO: Does not work if totalPrizes is not divisible by winners.length
+        prizes[auctionLive] = totalPrizes / winners.length;
         // update auction info
         auctions[auctionLive] = auction;
         // create a new auction
@@ -170,7 +213,7 @@ contract AttributeAuction is ERC721Enumerable {
      * @dev It must be called once per auction won
      * TODO: Create a view function that returns the number of prizes a winner has
      */
-    function collectPrizes() external {
+    function collectPrizes() external notPaused {
         // get auctions won by this address
         uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
         // get the last auction won by this address
@@ -187,15 +230,75 @@ contract AttributeAuction is ERC721Enumerable {
         _mint(prizeAmount, targetAuction);
     }
 
+    function myPrizes() external view {}
+
+    function setReservePrice(uint256 _reservePrice) external onlyOwner {
+        reservePrice = _reservePrice;
+    }
+
+    function setMinBidIncrementPercentage(uint256 _minBidIncrementPercentage)
+        external
+        onlyOwner
+    {
+        minBidIncrementPercentage = _minBidIncrementPercentage;
+    }
+
+    function setBlockDuration(uint256 _blockDuration) external onlyOwner {
+        blockDuration = _blockDuration;
+    }
+
+    function togglePaused() external onlyOwner {
+        isPaused = !isPaused;
+    }
+
+    /**
+     * @dev Withdraw all of the ether in this contract to the contract owner
+     */
+    function withdraw() external onlyOwner {
+        (bool sent, ) = owner().call{value: address(this).balance}("");
+        require(sent, "Withdraw failed");
+    }
+
+    function refundBid(address user_, uint256 amount_) internal {
+        (bool sent, ) = user_.call{value: amount_}("");
+        require(sent, "Refund failed");
+    }
+
+    /**
+     * @dev Creates a new auction
+     */
+    function _createAuction() internal notPaused {
+        // increment auction number
+        auctionLive++;
+        // create new auction
+        auctions[auctionLive] = Auction({
+            startTime: block.number,
+            endTime: block.number + blockDuration,
+            winningBidsPlaced: 0,
+            settled: false,
+            lotType: getAuctionLotType()
+        });
+        // create a new prize pool
+        PrizePool storage pPool = prizePool[auctionLive];
+        // get number of tokens to be minted for this auction
+        (, , uint256 tokenAmount) = tokenIdRange(auctionLive);
+        // set number of tokens to be minted for this auction
+        pPool.leftToMint = tokenAmount;
+    }
+
     /**
      * @dev Mints a number of tokens for a winner of an auction
      */
     function _mint(uint256 amount_, uint256 auctionId) internal {
+        // get the prize pool by auction id
         PrizePool storage pPool = prizePool[auctionId];
+        // get the lowest token id for this auction
         (uint256 tokenIdLow, , ) = tokenIdRange(auctionId);
+        // get how many tokens are left to mint for this auction
         uint256 leftToMint = pPool.leftToMint;
+        // get the current prng for this auction
         uint256 currentPrng = pPool.currentPrng;
-        uint256 tokenId;
+        // loop through the amount of tokens to mint
         for (uint256 i = 0; i < amount_; i++) {
             /**
              * @notice Pull a random token id to be minted next
@@ -207,7 +310,7 @@ contract AttributeAuction is ERC721Enumerable {
              **/
             currentPrng = _prng(leftToMint, currentPrng);
             uint256 index = 1 + (currentPrng % leftToMint);
-            tokenId = pPool.idSwaps[index];
+            uint256 tokenId = pPool.idSwaps[index];
             if (tokenId == 0) {
                 tokenId = index;
             }
@@ -226,7 +329,7 @@ contract AttributeAuction is ERC721Enumerable {
     }
 
     /**
-     * @dev prng to be used by _pullRandomTokenId
+     * @dev prng to be used by _mint
      * @param leftToMint_ number of tokens left to mint
      * @param currentPrng_ the last value returned by this function
      */
@@ -247,21 +350,38 @@ contract AttributeAuction is ERC721Enumerable {
             );
     }
 
+    /**
+     * @dev Returns the winners of an auction
+     * @param auctionId The id of the auction to get winners for
+     */
     function winnersOfAuction(uint256 auctionId)
         internal
         view
         returns (address[] memory)
     {
+        // get auction by id
         Auction memory auction = auctions[auctionId];
+        // create an array of addresses to store winners
         address[] memory winners = new address[](auction.winningBidsPlaced);
+        // get the first bid in the bid tree
         uint256 currentValue = bidTrees[auctionId].first();
         for (uint256 i = 0; i < (auction.winningBidsPlaced - 1); i++) {
+            // add the address of the bid from the bid tree to the winners array
             winners[i] = bids[auctionId][currentValue];
+            // get the next bid in the bid tree
             currentValue = bidTrees[auctionId].next(currentValue);
         }
+        // return the winners array
         return winners;
     }
 
+    /**
+     * @dev Returns the token id range for an auction
+     * @param auctionId The id of the auction to get the token id range for
+     * @return tokenIdLow The lowest token id for this auction
+     * @return tokenIdHigh The highest token id for this auction
+     * @return tokenAmount The amount of tokens in this auction
+     */
     function tokenIdRange(uint256 auctionId)
         internal
         view
@@ -271,10 +391,15 @@ contract AttributeAuction is ERC721Enumerable {
             uint256
         )
     {
+        // get auction by id
         Auction memory auction = auctions[auctionId];
+        // get the token id range for the auction
         uint256 tokenAmount;
+        // get the highest token id for this auction
         uint256 tokenIdHigh;
+        // get the lowest token id for this auction
         uint256 tokenIdLow;
+        // get the token id range for the auction based on the auction phase
         if (auction.lotType > LotType.PHASE_1) {
             tokenIdHigh += 20 * 256;
         } else if (auction.lotType == LotType.PHASE_1) {
@@ -303,9 +428,17 @@ contract AttributeAuction is ERC721Enumerable {
             tokenIdLow = tokenIdHigh - 32;
             tokenAmount = 32;
         }
+        // return the lowest token id, the highest token id, and the amount of tokens in the auction
         return (tokenIdLow, tokenIdHigh, tokenAmount);
     }
 
+    /**
+     * @dev returns the lot info for a given lot type
+     * @param lotType_ the lot type to get info for
+     * @return winnersAllowed the amount of winners allowed for this lot type
+     * @return amountOfType the amount of auctions of this type
+     * @return totalAmount the total amount of tokens per auction of this type
+     */
     function getLotInfo(LotType lotType_)
         internal
         pure
@@ -315,6 +448,7 @@ contract AttributeAuction is ERC721Enumerable {
             uint256 totalAmount
         )
     {
+        // get the lot info for the given lot type
         if (lotType_ == LotType.PHASE_1) {
             return (64, 20, 256);
         } else if (lotType_ == LotType.PHASE_2) {
@@ -326,7 +460,11 @@ contract AttributeAuction is ERC721Enumerable {
         }
     }
 
-    function getAuctionLotType() internal view returns (LotType) {
+    /**
+     * @dev returns the lot type for the current auction
+     * @return lotType the lot type for the current auction
+     */
+    function getAuctionLotType() internal view returns (LotType lotType) {
         uint256 currentAuction = auctionLive;
         if (currentAuction <= 20) {
             return LotType.PHASE_1;
