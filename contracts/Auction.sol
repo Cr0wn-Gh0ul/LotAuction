@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import "./Constants.sol";
 import "./RedBlackTreeLibrary.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
+/**
+ * TODO:
+ * - rename variables (pre _, post _, descriptive names)
+ * - restructure to proper order
+ * - add comments
+ */
 contract AttributeAuction is ERC721, Ownable {
     using RedBlackTreeLibrary for RedBlackTreeLibrary.Tree;
     enum LotType {
@@ -39,6 +46,10 @@ contract AttributeAuction is ERC721, Ownable {
     mapping(uint256 => uint256) public prizes;
     // auction number (auctionLive) => prize pool
     mapping(uint256 => PrizePool) internal prizePool;
+    // auction number (auctionLive) => slush fund prize amount
+    mapping(uint256 => uint256) public slushPrizePool;
+    // auctions with leftOver prizes
+    uint256[] public auctionSlushFund;
     // current auction number
     uint256 public auctionLive;
     // minimum bid
@@ -51,7 +62,7 @@ contract AttributeAuction is ERC721, Ownable {
     bool isPaused;
 
     modifier notPaused() {
-        require(!isPaused, "Contract is not paused");
+        require(!isPaused, "Contract is paused");
         _;
     }
 
@@ -64,10 +75,10 @@ contract AttributeAuction is ERC721, Ownable {
     }
 
     constructor() ERC721("AttributeAuction", "ATTR") {
-        reservePrice = 0.01 ether;
-        minBidIncrementPercentage = 5;
-        blockDuration = 1800;
-        _createAuction();
+        reservePrice = 0.01 ether; // 0.01 ETH
+        minBidIncrementPercentage = 5; // 5%
+        blockDuration = 1800; // about 6 hours
+        _createAuction(); // start the first auction
     }
 
     /**
@@ -80,48 +91,26 @@ contract AttributeAuction is ERC721, Ownable {
      * @dev Does not accept bids from an address more than once
      */
     function addBid() public payable notPaused {
-        // check if bid already exists
-        require(activeBid[auctionLive][msg.sender] == 0, "Bid already exists");
         // get current auction
         Auction memory auction = auctions[auctionLive];
-        // get bid amount
-        uint256 amount = msg.value;
-        // check if the current auction has been settled
-        checkActiveAuction();
-        // check if bid is greater than reserve price
-        require(amount > reservePrice, "Bid amount is less than reserve price");
-        // check if bid for this amount already exists
-        // TODO: Maybe Helper function for frontend
-        require(!bidTrees[auctionLive].exists(amount), "Bid already exists");
-        // get max number of winning bids allowed for this auction
-        (uint256 winnersAllowed, , ) = getLotInfo(auction.lotType);
+        // check if this is a valid bid
+        uint256 lowestBid = validateBid(auction, msg.value, msg.sender);
         // if number of winning bids is equal to max number of winning bids
-        if (auction.winningBidsPlaced >= winnersAllowed) {
-            // find lowest winning bid
-            uint256 lowestBid = bidTrees[auctionLive].first();
-            // require bid is greater than lowest winning bid
-            require(
-                amount >
-                    lowestBid + ((lowestBid * minBidIncrementPercentage) / 100),
-                "Bid amount is less than the lowest winning bid + minBidIncrementPercentage"
-            );
+        if (lowestBid > 0) {
             // remove lowest winning bid from bid tree
             bidTrees[auctionLive].remove(lowestBid);
             // send lowest winning bid back to bidder
             refundBid(bids[auctionLive][lowestBid], lowestBid);
-            // delete bid from active bid mapping
-            delete bids[auctionLive][lowestBid];
         } else {
             // increment number of winning bids
             auction.winningBidsPlaced++;
         }
         // add bid to active bid mapping
-        activeBid[auctionLive][msg.sender] = amount;
+        activeBid[auctionLive][msg.sender] = msg.value;
         // add bid to bid tree
-        bidTrees[auctionLive].insert(amount);
-        // add bid to address mapping for this auction
+        bidTrees[auctionLive].insert(msg.value);
         // for reverse tree lookup
-        bids[auctionLive][amount] = msg.sender;
+        bids[auctionLive][msg.value] = msg.sender;
         // update auction info
         auctions[auctionLive] = auction;
     }
@@ -149,32 +138,75 @@ contract AttributeAuction is ERC721, Ownable {
      * @dev Only accepts bids that have already been placed
      */
     function removeBid() external payable notPaused activeBidder {
-        checkActiveAuction();
+        Auction memory auction = auctions[auctionLive];
+        // check if auction is active
+        checkActiveAuction(auction);
         // get bid on this auction
         uint256 lastBid = activeBid[auctionLive][msg.sender];
         // remove lowest winning bid from bid tree
         bidTrees[auctionLive].remove(lastBid);
         // send lowest winning bid back to bidder
         refundBid(bids[auctionLive][lastBid], lastBid);
-        // delete bid from active bid mapping
-        delete bids[auctionLive][lastBid];
         // delete bid from active winningBidsPlaced
-        Auction storage auction = auctions[auctionLive];
         auction.winningBidsPlaced--;
+        // update auction
+        auctions[auctionLive] = auction;
     }
 
     /**
      * @dev checks if the auction is active and okay for bidding or bid removal
      */
-    function checkActiveAuction() internal view {
-        // get current auction
-        Auction memory auction = auctions[auctionLive];
+    function checkActiveAuction(Auction memory auction) public view {
         // check if the current auction has been settled
         require(!auction.settled, "Auction has been settled");
         // check if the auction has started
         require(auction.startTime >= block.number, "Auction has not started");
         // check if the auction has ended
         require(auction.endTime <= block.number, "Auction has ended");
+    }
+
+    function validateBid(
+        Auction memory auction,
+        uint256 amount_,
+        address addr_
+    ) public view returns (uint256) {
+        // check the active auction
+        checkActiveAuction(auction);
+        // check if bid already exists
+        require(activeBid[auctionLive][addr_] == 0, "Bid already exists");
+        // chheck if bid is greater than reserve price
+        require(
+            amount_ > reservePrice,
+            "Bid amount is less than reserve price"
+        );
+        // check if bid for this amount already exists
+        require(!bidTrees[auctionLive].exists(amount_), "Bid already exists");
+        // check if new bid is valid
+        return newValidBid(auction, amount_);
+    }
+
+    function newValidBid(Auction memory auction_, uint256 value_)
+        public
+        view
+        returns (uint256)
+    {
+        // get lot info
+        (uint256 winnersAllowed, , ) = getLotInfo(auction_.lotType);
+        // see if we are replacing a bid
+        if (auction_.winningBidsPlaced >= winnersAllowed) {
+            // find lowest winning bid
+            uint256 lowestBid = bidTrees[auctionLive].first();
+            // require bid is greater than lowest winning bid
+            require(
+                value_ >
+                    lowestBid + ((lowestBid * minBidIncrementPercentage) / 100),
+                "Bid amount is less than the lowest winning bid + minBidIncrementPercentage"
+            );
+            // return the lowest winning bid
+            return lowestBid;
+        }
+        // max number of winning bids not reached
+        return 0;
     }
 
     /**
@@ -199,8 +231,14 @@ contract AttributeAuction is ERC721, Ownable {
             // add this auction to the winners address => auctions[] mapping
             auctionsWon[winners[i]].push(auctionLive);
         }
+        uint256 prizesPerAddressRemainder = totalPrizes % winners.length;
+        if (prizesPerAddressRemainder > 0) {
+            // add this auction to the slush fund
+            auctionSlushFund.push(auctionLive);
+            // add remainder amount of tokens to slush fund
+            slushPrizePool[auctionLive] = prizesPerAddressRemainder;
+        }
         // map this auction => prizes per address mapping
-        // TODO: Does not work if totalPrizes is not divisible by winners.length
         prizes[auctionLive] = totalPrizes / winners.length;
         // update auction info
         auctions[auctionLive] = auction;
@@ -211,7 +249,6 @@ contract AttributeAuction is ERC721, Ownable {
     /**
      * @dev Collects prizes for a winner for one auction they have won
      * @dev It must be called once per auction won
-     * TODO: Create a view function that returns the number of prizes a winner has
      */
     function collectPrizes() external notPaused {
         // get auctions won by this address
@@ -227,10 +264,41 @@ contract AttributeAuction is ERC721, Ownable {
         // get the number of prizes won for this auction
         uint256 prizeAmount = prizes[auctionClaim];
         // mint the prizes for this auction
-        _mint(prizeAmount, targetAuction);
+        _mint(prizeAmount, targetAuction, msg.sender);
     }
 
-    function myPrizes() external view {}
+    /**
+     * @dev Returns the number of prizes a winner has won
+     */
+    function viewPrizesCount() external view returns (uint256) {
+        // get auctions won by this address
+        uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
+        // accumulate the number of prizes won
+        uint256 prizesAmount;
+        for (uint256 i = 0; i < auctionsWon_.length; i++) {
+            // get auction id
+            uint256 auctionClaim = auctionsWon_[i];
+            // add the number of prizes won for this auction
+            prizesAmount += prizes[auctionClaim];
+        }
+        // return the number of prizes won
+        return prizesAmount;
+    }
+
+    /**
+     * @dev Mints slush fund prizes to a specified address
+     * @dev To be used for social media giveaways if any is accumulated
+     */
+    function slushMintTo(address to_) external onlyOwner {
+        // auction that has slush fund
+        uint256 slushAuction = auctionSlushFund[auctionSlushFund.length - 1];
+        // Get the amount of tokens in the slush pool.
+        uint256 slushAmount = slushPrizePool[slushAuction];
+        // Remove the auction from the slush pool.
+        auctionSlushFund.pop();
+        // Mint the tokens to the address.
+        _mint(slushAmount, slushAuction, to_);
+    }
 
     function setReservePrice(uint256 _reservePrice) external onlyOwner {
         reservePrice = _reservePrice;
@@ -259,7 +327,13 @@ contract AttributeAuction is ERC721, Ownable {
         require(sent, "Withdraw failed");
     }
 
+    /**
+     * @dev Refunds a bid and removes the bid from the active bid mapping
+     */
     function refundBid(address user_, uint256 amount_) internal {
+        // delete bid from active bid mapping
+        delete bids[auctionLive][amount_];
+        // refund bid
         (bool sent, ) = user_.call{value: amount_}("");
         require(sent, "Refund failed");
     }
@@ -289,7 +363,11 @@ contract AttributeAuction is ERC721, Ownable {
     /**
      * @dev Mints a number of tokens for a winner of an auction
      */
-    function _mint(uint256 amount_, uint256 auctionId) internal {
+    function _mint(
+        uint256 amount_,
+        uint256 auctionId,
+        address to
+    ) internal {
         // get the prize pool by auction id
         PrizePool storage pPool = prizePool[auctionId];
         // get the lowest token id for this auction
@@ -322,7 +400,7 @@ contract AttributeAuction is ERC721, Ownable {
                 delete pPool.idSwaps[leftToMint];
             }
             leftToMint -= 1;
-            _safeMint(msg.sender, (tokenId + tokenIdLow));
+            _safeMint(to, (tokenId + tokenIdLow));
         }
         pPool.leftToMint = leftToMint;
         pPool.currentPrng = currentPrng;
@@ -401,32 +479,32 @@ contract AttributeAuction is ERC721, Ownable {
         uint256 tokenIdLow;
         // get the token id range for the auction based on the auction phase
         if (auction.lotType > LotType.PHASE_1) {
-            tokenIdHigh += 20 * 256;
+            tokenIdHigh += PHASE_ONE_COUNT * PHASE_ONE_TOKEN_AMOUNT;
         } else if (auction.lotType == LotType.PHASE_1) {
-            tokenIdHigh += auctionId * 256;
-            tokenIdLow = tokenIdHigh - 256;
-            tokenAmount = 256;
+            tokenIdHigh += auctionId * PHASE_ONE_TOKEN_AMOUNT;
+            tokenIdLow = tokenIdHigh - PHASE_ONE_TOKEN_AMOUNT;
+            tokenAmount = PHASE_ONE_TOKEN_AMOUNT;
         }
         if (auction.lotType > LotType.PHASE_2) {
-            tokenIdHigh += 15 * 128;
+            tokenIdHigh += PHASE_TWO_COUNT * PHASE_TWO_TOKEN_AMOUNT;
         } else if (auction.lotType == LotType.PHASE_2) {
-            tokenIdHigh += auctionId * 128;
-            tokenIdLow = tokenIdHigh - 128;
-            tokenAmount = 128;
+            tokenIdHigh += auctionId * PHASE_TWO_TOKEN_AMOUNT;
+            tokenIdLow = tokenIdHigh - PHASE_TWO_TOKEN_AMOUNT;
+            tokenAmount = PHASE_TWO_TOKEN_AMOUNT;
         }
         if (auction.lotType > LotType.PHASE_3) {
-            tokenIdHigh += 10 * 64;
+            tokenIdHigh += PHASE_THREE_COUNT * PHASE_THREE_TOKEN_AMOUNT;
         } else if (auction.lotType == LotType.PHASE_3) {
-            tokenIdHigh += auctionId * 64;
-            tokenIdLow = tokenIdHigh - 64;
-            tokenAmount = 64;
+            tokenIdHigh += auctionId * PHASE_THREE_TOKEN_AMOUNT;
+            tokenIdLow = tokenIdHigh - PHASE_THREE_TOKEN_AMOUNT;
+            tokenAmount = PHASE_THREE_TOKEN_AMOUNT;
         }
         if (auction.lotType > LotType.PHASE_4) {
-            tokenIdHigh += 5 * 32;
+            tokenIdHigh += PHASE_FOUR_COUNT * PHASE_FOUR_TOKEN_AMOUNT;
         } else if (auction.lotType == LotType.PHASE_4) {
-            tokenIdHigh += auctionId * 32;
-            tokenIdLow = tokenIdHigh - 32;
-            tokenAmount = 32;
+            tokenIdHigh += auctionId * PHASE_FOUR_TOKEN_AMOUNT;
+            tokenIdLow = tokenIdHigh - PHASE_FOUR_TOKEN_AMOUNT;
+            tokenAmount = PHASE_FOUR_TOKEN_AMOUNT;
         }
         // return the lowest token id, the highest token id, and the amount of tokens in the auction
         return (tokenIdLow, tokenIdHigh, tokenAmount);
@@ -450,13 +528,21 @@ contract AttributeAuction is ERC721, Ownable {
     {
         // get the lot info for the given lot type
         if (lotType_ == LotType.PHASE_1) {
-            return (64, 20, 256);
+            return (PHASE_ONE_WINNERS, PHASE_ONE_COUNT, PHASE_ONE_TOKEN_AMOUNT);
         } else if (lotType_ == LotType.PHASE_2) {
-            return (32, 15, 128);
+            return (PHASE_TWO_WINNERS, PHASE_TWO_COUNT, PHASE_TWO_TOKEN_AMOUNT);
         } else if (lotType_ == LotType.PHASE_3) {
-            return (8, 10, 64);
+            return (
+                PHASE_THREE_WINNERS,
+                PHASE_THREE_COUNT,
+                PHASE_THREE_TOKEN_AMOUNT
+            );
         } else if (lotType_ == LotType.PHASE_4) {
-            return (4, 5, 32);
+            return (
+                PHASE_FOUR_WINNERS,
+                PHASE_FOUR_COUNT,
+                PHASE_FOUR_TOKEN_AMOUNT
+            );
         }
     }
 
@@ -466,13 +552,22 @@ contract AttributeAuction is ERC721, Ownable {
      */
     function getAuctionLotType() internal view returns (LotType lotType) {
         uint256 currentAuction = auctionLive;
-        if (currentAuction <= 20) {
+        if (currentAuction <= PHASE_ONE_COUNT) {
             return LotType.PHASE_1;
-        } else if (currentAuction <= 35) {
+        } else if (currentAuction <= PHASE_ONE_COUNT + PHASE_TWO_COUNT) {
             return LotType.PHASE_2;
-        } else if (currentAuction <= 45) {
+        } else if (
+            currentAuction <=
+            PHASE_ONE_COUNT + PHASE_TWO_COUNT + PHASE_THREE_COUNT
+        ) {
             return LotType.PHASE_3;
-        } else if (currentAuction <= 50) {
+        } else if (
+            currentAuction <=
+            PHASE_ONE_COUNT +
+                PHASE_TWO_COUNT +
+                PHASE_THREE_COUNT +
+                PHASE_FOUR_COUNT
+        ) {
             return LotType.PHASE_4;
         }
     }
