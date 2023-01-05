@@ -1,5 +1,6 @@
 import "@nomiclabs/hardhat-ethers";
 import "@nomiclabs/hardhat-truffle5";
+import "hardhat-interface-generator";
 import * as dotenv from "dotenv";
 import "@nomiclabs/hardhat-ethers";
 import { HardhatUserConfig, task } from "hardhat/config";
@@ -24,13 +25,19 @@ task("accounts", "Prints the list of accounts", async (taskArgs, hre) => {
 const config: HardhatUserConfig = {
 
     networks: {
+        dev: {
+            url: "http://127.0.0.1:8545"
+        },
         hardhat: {
             chainId: 1337,
             allowUnlimitedContractSize: false,
             mining: {
                 auto: true,
-                interval: 0,
+                interval: 3000,
             },
+            accounts: {
+                count: 101
+            }
         },
     },
 
