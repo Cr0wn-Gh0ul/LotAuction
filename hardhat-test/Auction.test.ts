@@ -24,16 +24,55 @@ describe("Auction", () => {
   });
   it("should get auction", async () => {
     let tx = await auctionH.getAuction();
-    console.log(tx)
     expect(tx).to.not.be.undefined;
   });
   it("should bid in auction", async () => {
     let options = {
-      value: ethers.utils.parseEther("0.1"),
+      value: ethers.utils.parseEther("0.01"),
     };
-    let signerAuction = auctionH.connect(signers[1])
+    let signerAuction = auctionH.connect(signers[0]);
     let tx = await signerAuction.addBid(options);
-    await tx.wait();
+    await tx.wait(1);
+  });
+  ///
+  it("should remove bid in auction", async () => {
+    let signerAuction = auctionH.connect(signers[0]);
+    let tx = await signerAuction.removeBid();
+    await tx.wait(1);
+  });
+  it("should add new bid in auction", async () => {
+    let options = {
+      value: ethers.utils.parseEther("0.01"),
+    };
+    let signerAuction = auctionH.connect(signers[0]);
+    let tx = await signerAuction.addBid(options);
+    await tx.wait(1);
+  });
+  it("should increase bid in auction", async () => {
+    let options = {
+      value: ethers.utils.parseEther("0.005"),
+    };
+    let signerAuction = auctionH.connect(signers[0]);
+    let tx = await signerAuction.increaseBid(options);
+    await tx.wait(1);
+  });
+  it("should remove increased bid", async () => {
+    let signerAuction = auctionH.connect(signers[0]);
+    let tx = await signerAuction.removeBid();
+    await tx.wait(1);
+  });
+  it("should add 64 bids in auction", async () => {
+    let bidValue = ethers.utils.parseEther("0.01")
+    for (let i = 0; i < 64; i++) {
+      bidValue = bidValue.add(bidValue.mul(5).div(100))
+      console.log(bidValue.toString())
+      let options = {
+        value: bidValue,
+      };
+      let signerAuction = auctionH.connect(signers[i]);
+      let tx = await signerAuction.addBid(options);
+      await tx.wait(1);
+    }
   });
 });
 

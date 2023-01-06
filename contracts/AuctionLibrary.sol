@@ -30,12 +30,21 @@ library AuctionLibrary {
         bool settled;
     }
 
-    /*    constructor(uint256 maxWinningBids_) {
-        maxWinningBids = maxWinningBids_;
-        startTime = block.number;
-        endTime = block.number + blockDuration;
+        /**
+     * @dev checks if the auction is active and okay for bidding or bid removal
+     * TODO: MAKE THIS A MODIFIER
+     */
+    modifier checkActiveAuction(Auction storage auction_) {
+        // check if the current auction has been settled
+        require(!auction_.auctionBase.settled, "Auction has been settled");
+        // check if the auction has started
+        require(block.number >= auction_.auctionBase.startTime, "Auction has not started");
+        // check if the auction has ended
+        require(block.number <= auction_.auctionBase.endTime, "Auction has ended");
+        _;
     }
-*/
+
+
     function addBid(Auction storage auction_) public {
         // check if this is a valid bid
         uint256 lowestBid = validateBid(auction_, msg.value, msg.sender);
@@ -61,11 +70,10 @@ library AuctionLibrary {
         auction_.bidTree.insert(msg.value);
     }
 
-    function removeBid(Auction storage auction_) external {
-        // check if auction is active
-        checkActiveAuction(auction_);
+    function removeBid(Auction storage auction_) external checkActiveAuction(auction_) {
         // get bid on this auction
         uint256 lastBid = auction_.addressToAmount[msg.sender];
+        auction_.addressToAmount[msg.sender] = 0;
         // remove lowest winning bid from bid tree
         auction_.bidTree.remove(lastBid);
         // send lowest winning bid back to bidder
@@ -74,51 +82,42 @@ library AuctionLibrary {
         auction_.auctionBase.winningBidsPlaced--;
     }
 
-    function increaseBid(Auction storage auction_) external {
+    function increaseBid(Auction storage auction_) external checkActiveAuction(auction_) {
+        require(auction_.addressToAmount[msg.sender] > 0, "No bid exists");
         // get bid on this auction
         uint256 lastBid = auction_.addressToAmount[msg.sender];
+        uint256 newBid = (lastBid + msg.value);
         // check if new bid is greater than last
         require(
-            msg.value > lastBid + ((lastBid * auction_.auctionBase.minBidIncrement) / 100),
+            newBid > lastBid + ((lastBid * auction_.auctionBase.minBidIncrement) / 100),
             "New bid is lower than last bid plus minimum bid increment"
         );
-        // remove last bid from this auction
-        auction_.addressToAmount[msg.sender] = 0;
-        // add the new bid
-        addBid(auction_);
+        auction_.bidTree.remove(lastBid);
+
+        auction_.addressToAmount[msg.sender] = newBid;
+        // for reverse tree lookup
+        auction_.amountToAddress[newBid] = msg.sender;
+        // add bid to bid tree
+        auction_.bidTree.insert(newBid);
     }
 
     function validateBid(
         Auction storage auction_,
         uint256 amount_,
         address addr_
-    ) public view returns (uint256) {
-        // check the active auction
-        checkActiveAuction(auction_);
+    ) public view checkActiveAuction(auction_) 
+    returns (uint256) {
         // check if bid already exists
         require(auction_.addressToAmount[addr_] == 0, "Bid already exists");
         // chheck if bid is greater than reserve price
         require(
-            amount_ > auction_.auctionBase.reservePrice,
+            amount_ >= auction_.auctionBase.reservePrice,
             "Bid amount is less than reserve price"
         );
         // check if bid for this amount already exists
         require(!auction_.bidTree.exists(amount_), "Bid already exists");
         // check if new bid is valid
         return newValidBid(auction_, amount_);
-    }
-
-    /**
-     * @dev checks if the auction is active and okay for bidding or bid removal
-     * TODO: MAKE THIS A MODIFIER
-     */
-    function checkActiveAuction(Auction storage auction_) public view {
-        // check if the current auction has been settled
-        require(!auction_.auctionBase.settled, "Auction has been settled");
-        // check if the auction has started
-        require(auction_.auctionBase.startTime >= block.number, "Auction has not started");
-        // check if the auction has ended
-        require(auction_.auctionBase.endTime <= block.number, "Auction has ended");
     }
 
     function newValidBid(Auction storage auction_, uint256 value_)
@@ -132,7 +131,7 @@ library AuctionLibrary {
             uint256 lowestBid = auction_.bidTree.first();
             // require bid is greater than lowest winning bid
             require(
-                value_ >
+                value_ >=
                     lowestBid + ((lowestBid * auction_.auctionBase.minBidIncrement) / 100),
                 "Bid amount is less than the lowest winning bid + minBidIncrement"
             );

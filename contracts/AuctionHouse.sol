@@ -294,12 +294,13 @@ contract AuctionHouse is ERC721, AccessControl {
         AuctionLibrary.LotType lotType = AuctionLibrary._getAuctionLotType(
             auctionNow
         );
+        (uint256 winnersAllowed, , ) = AuctionLibrary._getLotInfo(lotType);
         AuctionLibrary.Auction storage auction = _auctions[auctionNow];
         auction.auctionBase.startTime = block.number;
         auction.auctionBase.endTime = block.number + blockDuration;
         auction.auctionBase.winningBidsPlaced = 0;
         auction.auctionBase.settled = false;
-        auction.auctionBase.maxWinningBids = maxWinningBids;
+        auction.auctionBase.maxWinningBids = winnersAllowed;
         auction.auctionBase.reservePrice = reservePrice;
         auction.auctionBase.minBidIncrement = minBidIncrement;
         auction.lotType = lotType;

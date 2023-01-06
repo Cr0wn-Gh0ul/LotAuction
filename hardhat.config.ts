@@ -33,7 +33,7 @@ const config: HardhatUserConfig = {
             allowUnlimitedContractSize: false,
             mining: {
                 auto: true,
-                interval: 3000,
+                interval: 1500,
             },
             accounts: {
                 count: 101
