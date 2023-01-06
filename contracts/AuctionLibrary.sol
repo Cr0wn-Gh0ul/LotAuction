@@ -27,12 +27,13 @@ library AuctionLibrary {
         uint256 endTime;
         uint256 reservePrice;
         uint256 minBidIncrement;
+        uint256 totalValue;
         bool settled;
     }
 
         /**
      * @dev checks if the auction is active and okay for bidding or bid removal
-     * TODO: MAKE THIS A MODIFIER
+     * TODO: ONLY ENDED is needed
      */
     modifier checkActiveAuction(Auction storage auction_) {
         // check if the current auction has been settled
@@ -68,6 +69,7 @@ library AuctionLibrary {
         auction_.amountToAddress[msg.value] = msg.sender;
         // add bid to bid tree
         auction_.bidTree.insert(msg.value);
+        auction_.auctionBase.totalValue += msg.value;
     }
 
     function removeBid(Auction storage auction_) external checkActiveAuction(auction_) {
@@ -77,9 +79,10 @@ library AuctionLibrary {
         // remove lowest winning bid from bid tree
         auction_.bidTree.remove(lastBid);
         // send lowest winning bid back to bidder
-        _refundBid(auction_, auction_.amountToAddress[lastBid], lastBid);
         // delete bid from active winningBidsPlaced
         auction_.auctionBase.winningBidsPlaced--;
+        auction_.auctionBase.totalValue -= lastBid;
+        _refundBid(auction_, auction_.amountToAddress[lastBid], lastBid);
     }
 
     function increaseBid(Auction storage auction_) external checkActiveAuction(auction_) {
@@ -93,7 +96,7 @@ library AuctionLibrary {
             "New bid is lower than last bid plus minimum bid increment"
         );
         auction_.bidTree.remove(lastBid);
-
+        auction_.auctionBase.totalValue += msg.value;
         auction_.addressToAmount[msg.sender] = newBid;
         // for reverse tree lookup
         auction_.amountToAddress[newBid] = msg.sender;

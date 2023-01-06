@@ -6,6 +6,7 @@ import "./AuctionLibrary.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "hardhat/console.sol";
 
 contract AuctionHouse is ERC721, AccessControl {
     enum LotType {
@@ -35,7 +36,7 @@ contract AuctionHouse is ERC721, AccessControl {
     mapping(uint256 => uint256) public slushPrizePool;
     // auctions with leftOver prizes
     uint256[] public auctionSlushFund;
-    uint256 auctionNow;
+    uint256 public auctionNow;
     bool public isPaused;
     address private _owner;
 
@@ -66,10 +67,6 @@ contract AuctionHouse is ERC721, AccessControl {
         _setupRole(MINTER_ROLE, msg.sender);
         _owner = msg.sender;
         _createAuction();
-    }
-
-    function mint() public onlyMinter {
-        _mint(msg.sender, 1);
     }
 
     function supportsInterface(bytes4 interfaceId)
@@ -134,6 +131,9 @@ contract AuctionHouse is ERC721, AccessControl {
         return _auctions[auctionNow].auctionBase;
     }
 
+/*
+TODO: Refund some % lot profit + slush fund if any, if no slush then higher %
+*/
     function settleAuction() external notPaused {
         // get current auction
         AuctionLibrary.Auction storage auction = _auctions[auctionNow];
@@ -141,7 +141,7 @@ contract AuctionHouse is ERC721, AccessControl {
         require(!auction.auctionBase.settled, "Auction has been settled");
         // check if the auction has ended
         require(
-            auction.auctionBase.endTime <= block.timestamp,
+            block.number >= auction.auctionBase.endTime,
             "Auction has not ended"
         );
         // set auction as settled
@@ -155,44 +155,49 @@ contract AuctionHouse is ERC721, AccessControl {
             // add this auction to the winners address => auctions[] mapping
             auctionsWon[winners[i]].push(auctionNow);
         }
+
         uint256 prizesPerAddressRemainder = totalPrizes % winners.length;
         if (prizesPerAddressRemainder > 0) {
-            // add this auction to the slush fund
-            auctionSlushFund.push(auctionNow);
-            // add remainder amount of tokens to slush fund
-            slushPrizePool[auctionNow] = prizesPerAddressRemainder;
+            // doesnt work, maybe just burn them all and remove slush
+            //auctionsWon[msg.sender].push(auctionNow);
         }
         // map this auction => prizes per address mapping
         prizesPerAddress[auctionNow] = totalPrizes / winners.length;
         // create a new auction
         _createAuction();
+        uint256 settlementReward = (auction.auctionBase.totalValue * 10) / 100;
+        (bool sent, ) = msg.sender.call{value: settlementReward}("");
+        require(sent, "Refund failed");
     }
 
     function collectPrizes() external notPaused {
         // get auctions won by this address
-        uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
+        //uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
         // get the last auction won by this address
-        uint256 targetAuction = auctionsWon_.length - 1;
+        
+        require(auctionsWon[msg.sender].length > 0, "No prizes to collect");
+        uint256 lastElIdx = auctionsWon[msg.sender].length -1;
+        //uint256 targetAuction = auctionsWon[msg.sender].length - 1;
         // require this address has won at least one auction
-        require(auctionsWon_.length > 0, "No prizes to collect");
+        //require(auctionsWon_.length > 0, "No prizes to collect");
         // get the number of prizes won for this auction
-        uint256 auctionClaim = auctionsWon_[targetAuction];
+        uint256 auctionClaim = auctionsWon[msg.sender][lastElIdx];
         // remove this auction from the winners address => auctions[] mapping
         auctionsWon[msg.sender].pop();
         // get the number of prizes won for this auction
         uint256 prizeAmount = prizesPerAddress[auctionClaim];
         // mint the prizes for this auction
-        _mint(prizeAmount, targetAuction, msg.sender);
+        _mint(prizeAmount, auctionClaim, msg.sender);
     }
 
     function viewPrizesCount() external view returns (uint256) {
         // get auctions won by this address
-        uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
+        //uint256[] memory auctionsWon_ = auctionsWon[msg.sender];
         // accumulate the number of prizes won
         uint256 prizesAmount;
-        for (uint256 i = 0; i < auctionsWon_.length; i++) {
+        for (uint256 i = 0; i < auctionsWon[msg.sender].length; i++) {
             // get auction id
-            uint256 auctionClaim = auctionsWon_[i];
+            uint256 auctionClaim = auctionsWon[msg.sender][i];
             // add the number of prizes won for this auction
             prizesAmount += prizesPerAddress[auctionClaim];
         }

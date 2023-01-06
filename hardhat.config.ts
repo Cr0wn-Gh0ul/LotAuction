@@ -47,16 +47,18 @@ const config: HardhatUserConfig = {
             {
                 version: "0.8.17",
                 settings: {
-                    viaIR: true,
+                    //viaIR: true,
                     optimizer: {
                         enabled: true,
-                        runs: 4_294_967_295,
+                        runs: 200,
                     },
+                    /*
                     outputSelection: {
                         "*": {
                             "*": ["evm.assembly", "irOptimized"],
                         },
                     },
+                    */
                 },
             },
         ]
