@@ -6,5 +6,6 @@ contract AuctionRunner {
         // check that its done
         // get winners
         // destroy the contract
+        // create new contract
     }
 }
