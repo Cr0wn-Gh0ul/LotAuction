@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import "@openzeppelin/contracts/finance/PaymentSplitter.sol";
 import "./Constants.sol";
 import "./RedBlackTreeLibrary.sol";
 
@@ -11,18 +12,18 @@ contract AuctionRuntime {
     struct AuctionData {
         uint256 maxWinningBids;
         uint256 winningBidsPlaced;
-        uint256 startTime;
         uint256 endTime;
         uint256 reservePrice;
         uint256 minBidIncrement;
         uint256 totalValue;
-        uint256 totalPrizes;
+        uint256 lotSize;
     }
     AuctionData public auction;
 
     mapping(address => uint256) addressToAmount;
     mapping(uint256 => address) amountToAddress;
 
+    bool public isPaused;
     address private _auctionOwner;
 
     modifier onlyAuctionOwner() {
@@ -32,9 +33,7 @@ contract AuctionRuntime {
         );
         _;
     }
-    /**
-     * @dev checks if the auction is active and okay for bidding or bid removal
-     */
+
     modifier isAuctionActive() {
         require(block.number <= auction.endTime, "Auction has ended");
         _;
@@ -45,13 +44,25 @@ contract AuctionRuntime {
         _;
     }
 
+    modifier notPaused() {
+        require(!isPaused, "Contract is paused");
+        _;
+    }
+
     constructor(AuctionData memory auction_, address auctionOwner_) {
         auction = auction_;
         _auctionOwner = auctionOwner_;
     }
 
-    function destroyAuction() private {
-        selfdestruct(payable(msg.sender));
+    function destroyAuction(address settler_) external onlyAuctionOwner {
+        uint256 nintyPercent = (address(this).balance * 90) / 100;
+        (bool sent, ) = _auctionOwner.call{value: nintyPercent}("");
+        require(sent, "Withdraw failed");
+        selfdestruct(payable(settler_));
+    }
+
+    function togglePaused() external onlyAuctionOwner {
+        isPaused = !isPaused;
     }
 
     function addBid() public payable isAuctionActive {
@@ -78,8 +89,14 @@ contract AuctionRuntime {
     function removeBid() external isAuctionActive hasActiveBid {
         auction.winningBidsPlaced--;
         _removeBid(msg.sender, addressToAmount[msg.sender]);
-
     }
+
+    function emergencyRelease() external hasActiveBid {
+        require(isPaused, "Contract is not paused");
+        auction.winningBidsPlaced--;
+        _removeBid(msg.sender, addressToAmount[msg.sender]);
+    }
+
     function _removeBid(address user_, uint256 amount_) internal {
         delete addressToAmount[user_];
         delete amountToAddress[amount_];
@@ -95,9 +112,7 @@ contract AuctionRuntime {
         uint256 lastBid = addressToAmount[msg.sender];
         uint256 newBid = (lastBid + msg.value);
         require(
-            newBid >
-                lastBid +
-                    ((lastBid * auction_.minBidIncrement) / 100),
+            newBid > lastBid + ((lastBid * auction_.minBidIncrement) / 100),
             "New bid is lower than last bid plus minimum bid increment"
         );
         bidTree.remove(lastBid);
@@ -117,15 +132,14 @@ contract AuctionRuntime {
         return _validateBid(a, address_, amount_);
     }
 
-    function _validateBid(AuctionData memory auction_, address address_, uint256 amount_)
-        internal
-        view
-        returns (bool isReplacement)
-    {
+    function _validateBid(
+        AuctionData memory auction_,
+        address address_,
+        uint256 amount_
+    ) internal view returns (bool isReplacement) {
         preCheckBid(auction_, address_, amount_);
         return isReplacementBid(auction_, amount_);
     }
-
 
     function preCheckBid(
         AuctionData memory auction_,
@@ -168,16 +182,10 @@ contract AuctionRuntime {
     /**
      * @dev Returns the winners of an auction
      */
-    function _winnersOfAuction()
-        internal
-        view
-        returns (address[] memory)
-    {
+    function winnersOfAuction() external view returns (address[] memory) {
         AuctionData memory auction_ = auction;
         // create an array of addresses to store winners
-        address[] memory winners = new address[](
-            auction_.winningBidsPlaced
-        );
+        address[] memory winners = new address[](auction_.winningBidsPlaced);
         // get the first bid in the bid tree
         uint256 currentValue = bidTree.first();
         for (uint256 i = 0; i < auction_.winningBidsPlaced; i++) {
