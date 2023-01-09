@@ -9,6 +9,7 @@ contract AuctionRuntime {
     using RedBlackTreeLibrary for RedBlackTreeLibrary.Tree;
 
     RedBlackTreeLibrary.Tree bidTree;
+    
     struct AuctionData {
         uint256 maxWinningBids;
         uint256 winningBidsPlaced;

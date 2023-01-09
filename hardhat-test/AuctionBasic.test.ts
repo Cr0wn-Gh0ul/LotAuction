@@ -5,21 +5,20 @@ import {
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 import { expect } from "chai";
 import { contract, network, ethers } from "hardhat";
-import { AuctionRunner } from "../typechain-types";
+import { AuctionRunner, NFTTraits } from "../typechain-types";
 import { ContractTransaction } from "@ethersproject/contracts";
 import type {BigNumber} from '@ethersproject/bignumber';
 import { mine } from "@nomicfoundation/hardhat-network-helpers";
-import { AuctionRuntime, NFTTraits } from "../typechain-types/contracts";
 
 let signers: SignerWithAddress[];
 let owner: SignerWithAddress;
 let badActor: SignerWithAddress;
 
 let nftContract: NFTTraits
-let auctionHouse: AuctionRunner;
-let currentAuction: AuctionRuntime;
+let currentAuction: AuctionRunner;
 
-describe("Auction", () => {
+
+describe("Auction Basic", () => {
   before(async () => {
     signers = await ethers.getSigners();
     signers.forEach(signer => {
@@ -39,8 +38,8 @@ describe("Auction", () => {
     expect(currentAuction.address).to.not.be.undefined;
   });
   it("should get auction", async () => {
-    let tx = await currentAuction.auction();
-    expect(tx).to.not.be.undefined;
+    let tx = await currentAuction.auctionCount();
+    expect(tx).to.be.gt(0);
   });
   it("should bid in auction", async () => {
     let options = {
@@ -149,24 +148,24 @@ describe("Auction", () => {
   
   it("should settle auction for reward", async () => {
     let balance = await signers[signers.length-1].getBalance()
-    let signerAuction = auctionHouse.connect(signers[signers.length-1]);
+    let signerAuction = currentAuction.connect(signers[signers.length-1]);
     let tx = await signerAuction.settleAuction();
     await tx.wait(1);
     let newBalance = await signers[signers.length-1].getBalance()
     expect(newBalance).to.be.gt(balance)
   });
   it("should not collect pizes if not from nft contract", async () => {
-    let signerAuction = auctionHouse.connect(badActor);
+    let signerAuction = currentAuction.connect(badActor);
       let tx = signerAuction.collectPrizes(badActor.address);
       await expect(tx).to.be.revertedWith("Caller is not a Minter")
   });
-  /*
-  it("should see prizes to collect", async () => {
-    let signerAuction = auctionHouse.connect(signers[0]);
-    let tx = await signerAuction.viewPrizesCount();
-    expect(tx.toString()).to.be.eq("4");
+  it("should have prizes", async () => {
+    for (let i = 0; i < 32; i++) {
+      let signerAuction = currentAuction.connect(signers[i]);
+      let tx = await signerAuction.winningAuctionCount();
+      expect(tx).to.be.eq(1);
+    }
   });
-*/
   it("half should collect prizes", async () => {
     for (let i = 0; i < 32; i++) {
       let signerAuction = nftContract.connect(signers[i]);
@@ -175,7 +174,7 @@ describe("Auction", () => {
     }
   });
   it("should get next auction", async () => {
-    let tx = await auctionHouse.auctionCount()
+    let tx = await currentAuction.auctionCount()
     expect(tx.toString()).to.be.eq("2");
   });
   it("second half should collect prizes from first auction", async () => {
@@ -189,31 +188,27 @@ describe("Auction", () => {
 });
 
 async function deploy() {
-  const NFTTraits = await ethers.getContractFactory("NFTTraits");
+  const Auction = await ethers.getContractFactory("AuctionRuntimeLibrary");
+  const auction = await Auction.deploy();
+  await auction.deployTransaction.wait(2);
+  const NFTTraits = await ethers.getContractFactory("NFTTraits", {
+    libraries: {
+      AuctionRuntimeLibrary: auction.address,
+    },
+  });
   const nft = await NFTTraits.deploy();
   await nft.deployTransaction.wait(2);
-  nftContract = nft as NFTTraits;
+  nftContract = nft as NFTTraits; 
   let auctionRunnerAddress = await nftContract.auctionRunner();
-  auctionHouse = await ethers.getContractAt("AuctionRunner", auctionRunnerAddress);
-  await startAuction();
-  await setCurrentAuction()
-}
-
-async function startAuction() {
-  let tx = await auctionHouse.startAuction();
+  currentAuction = await ethers.getContractAt("AuctionRunner", auctionRunnerAddress);
+  let tx = await currentAuction.startAuction();
   await tx.wait(2);
-}
-
-async function setCurrentAuction() {
-  let currentAuctionAddress = await auctionHouse.currentAuction();
-  let auction = await ethers.getContractAt("AuctionRuntime", currentAuctionAddress);
-  currentAuction = auction as AuctionRuntime;
 }
 
 async function skipToAuctionEnd() {
   let latestBlock = await ethers.provider.getBlock("latest")
-  let tx = await currentAuction.auction();
-  let numberOfBlocks = ((tx.endTime.toNumber() - latestBlock.number) + 1)
+  let tx = await currentAuction.getAuctionEndTime();
+  let numberOfBlocks = ((tx.toNumber() - latestBlock.number) + 1)
   await mine(numberOfBlocks)
 }
 

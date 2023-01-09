@@ -2,8 +2,22 @@
 pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "./AuctionRuntimeLibrary.sol";
+import "./AuctionRuntime.sol";
 import "./Constants.sol";
+
+interface IAuctionRuntime {
+    struct AuctionData {
+        uint256 maxWinningBids;
+        uint256 winningBidsPlaced;
+        uint256 endTime;
+        uint256 reservePrice;
+        uint256 minBidIncrement;
+        uint256 totalValue;
+        uint256 lotSize;
+    }
+
+    function auction() external returns (AuctionRuntime.AuctionData memory);
+}
 
 interface IAuctionOwner {
     function newPrizePool(
@@ -16,7 +30,6 @@ interface IAuctionOwner {
 }
 
 contract AuctionRunner is AccessControl {
-    using AuctionRuntimeLibrary for AuctionRuntimeLibrary.AuctionData;
     enum LotType {
         TYPE_1,
         TYPE_2,
@@ -29,7 +42,7 @@ contract AuctionRunner is AccessControl {
     uint256 public reservePrice = 0.01 ether;
     uint256 public minBidIncrement = 5;
 
-    mapping(uint256 => AuctionRuntimeLibrary.AuctionData) currentAuction;
+    AuctionRuntime public currentAuction;
     uint256 public auctionCount;
 
     address private _auctionOwner;
@@ -48,18 +61,6 @@ contract AuctionRunner is AccessControl {
         _;
     }
 
-    modifier notPaused() {
-        require(!currentAuction[auctionCount].isPaused, "Contract is paused");
-        _;
-    }
-    modifier activeBidder() {
-        require(
-            currentAuction[auctionCount].addressToAmount[msg.sender] > 0,
-            "Bidder has no active bid"
-        );
-        _;
-    }
-
     constructor(address owner_, address minter_) {
         _auctionOwner = minter_;
         _owner = owner_;
@@ -69,30 +70,20 @@ contract AuctionRunner is AccessControl {
 
     function startAuction() public onlyOwner {
         require(
-            auctionCount == 0,
+            address(currentAuction) == address(0),
             "There is already an auction running"
         );
         _createAuction();
     }
 
-    function addBid() external payable notPaused {
-        AuctionRuntimeLibrary.addBid(currentAuction[auctionCount]);
-    }
-
-    function removeBid() external notPaused activeBidder {
-        AuctionRuntimeLibrary.removeBid(currentAuction[auctionCount]);
-    }
-
-    function increaseBid() external payable notPaused activeBidder {
-        AuctionRuntimeLibrary.increaseBid(currentAuction[auctionCount]);
-    }
-    
     /**
      * THOU WHO SETTLES THE AUCTION SHALL RECEIVE 10% OF THE AUCTION'S VALUE
      */
     function settleAuction() public {
-        require(!currentAuction[auctionCount].isPaused, "Auction is paused");
-        AuctionRuntimeLibrary.AuctionData storage auction_ = currentAuction[auctionCount];
+        require(!currentAuction.isPaused(), "Auction is paused");
+        AuctionRuntime.AuctionData memory auction_ = IAuctionRuntime(
+            address(currentAuction)
+        ).auction();
         require(block.number >= auction_.endTime, "Auction has not ended");
         uint256 lowestId = _tokenIdRange(
             auctionCount,
@@ -124,19 +115,12 @@ contract AuctionRunner is AccessControl {
             leftToMint_
         );
 
-        address[] memory winners = AuctionRuntimeLibrary.winnersOfAuction(auction_);
+        address[] memory winners = currentAuction.winnersOfAuction();
         for (uint256 i = 0; i < winners.length; i++) {
             auctionsWon[winners[i]].push(auctionCount);
         }
-        uint256 nintyPercent = (auction_.totalValue * 10) / 100;
-        // TODO: safeTransfer
-        msg.sender.call{gas: 30000, value: nintyPercent}("");
-        delete currentAuction[auctionCount];
+        currentAuction.destroyAuction(msg.sender);
         _createAuction();
-    }
-
-    function getAuctionEndTime() external view returns (uint256) {
-        return currentAuction[auctionCount].endTime;
     }
 
     function setBlockDuration(uint256 blockDuration_) external onlyOwner {
@@ -152,7 +136,7 @@ contract AuctionRunner is AccessControl {
     }
 
     function togglePaused() external onlyOwner {
-        currentAuction[auctionCount].isPaused = !currentAuction[auctionCount].isPaused;
+        currentAuction.togglePaused();
     }
 
     function withdraw() external onlyOwner {
@@ -161,7 +145,7 @@ contract AuctionRunner is AccessControl {
     }
 
     function collectPrizes(address user_) external onlyMinter returns (uint256) {
-        require(!currentAuction[auctionCount].isPaused, "Auction is paused");
+        require(!currentAuction.isPaused(), "Auction is paused");
         require(auctionsWon[user_].length > 0, "No prizes to collect");
         uint256 lastElIdx = auctionsWon[user_].length - 1;
         uint256 auctionClaim = auctionsWon[user_][lastElIdx];
@@ -169,8 +153,8 @@ contract AuctionRunner is AccessControl {
         return auctionClaim;
     }
 
-    function winningAuctionCount() external view returns (uint256) {
-        return auctionsWon[msg.sender].length;
+    function hasPrizes() external view returns (bool) {
+        return auctionsWon[msg.sender].length > 0;
     }
 
     function viewWinningAuctions(uint256 idx_) external view returns (uint256) {
@@ -184,12 +168,21 @@ contract AuctionRunner is AccessControl {
             lotType
         );
 
-        AuctionRuntimeLibrary.AuctionData storage auctionData = currentAuction[auctionCount];
-        auctionData.maxWinningBids = winnersAllowed;
-        auctionData.endTime = block.number + blockDuration;
-        auctionData.reservePrice = reservePrice;
-        auctionData.minBidIncrement = minBidIncrement;
-        auctionData.lotSize = totalTokenAmount;
+        AuctionRuntime.AuctionData memory auctionData = AuctionRuntime
+            .AuctionData(
+                winnersAllowed,
+                0,
+                block.number + blockDuration,
+                reservePrice,
+                minBidIncrement,
+                0,
+                totalTokenAmount
+            );
+        AuctionRuntime newAuction = new AuctionRuntime(
+            auctionData,
+            address(this)
+        );
+        currentAuction = newAuction;
     }
 
     function _tokenIdRange(uint256 auctionNumber_, LotType auctionLotType_)
